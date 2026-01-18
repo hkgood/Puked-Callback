@@ -58,14 +58,22 @@ struct TripMetadata: Codable, Sendable {
     }
 }
 
-/// 轨迹点 (约 1Hz)
+/// 轨迹点 (支持 1Hz 基础点或 10Hz 高频点)
 struct TrajectoryPoint: Codable, Identifiable, Sendable {
     var id: Double { ts }
     let ts: Double
     let lat: Double
     let lng: Double
     let speed: Double
-    let lowConf: Bool? // 改为可选，防止某些版本没有该字段
+    let lowConf: Bool?
+    
+    // 高频传感器数据 (可选)
+    let ax: Double?
+    let ay: Double?
+    let az: Double?
+    let gx: Double?
+    let gy: Double?
+    let gz: Double?
     
     enum CodingKeys: String, CodingKey {
         case ts
@@ -73,6 +81,7 @@ struct TrajectoryPoint: Codable, Identifiable, Sendable {
         case lng
         case speed
         case lowConf = "low_conf"
+        case ax, ay, az, gx, gy, gz
     }
 }
 

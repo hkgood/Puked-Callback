@@ -12,6 +12,10 @@ struct MainView: View {
     @State private var playbackTimer: Timer?
     @State private var playbackSpeed: Double = 1.0
     
+    // 用于精确回放的基准变量
+    @State private var playbackStartWallTime: Date?
+    @State private var playbackStartPreviewTime: Double = 0
+    
     // 布局参数
     @State private var contentX: CGFloat = 0
     @State private var chartWidth: CGFloat = 560
@@ -22,8 +26,8 @@ struct MainView: View {
     
     // 片段导出
     @State private var showSegmentPanel = false
-    @State private var segmentStart: Double = 0
-    @State private var segmentEnd: Double = 0
+    @State private var segmentStartStr: String = "00:00"
+    @State private var segmentEndStr: String = "00:30"
     
     var body: some View {
         VStack(spacing: 0) {
@@ -33,7 +37,6 @@ struct MainView: View {
                 renderDropZone()
             }
         }
-        // 窗口尺寸固定为内容总和：50 + 400 + 90 = 540
         .frame(width: 600, height: 540) 
         .background(VisualEffectView(material: .underWindowBackground).ignoresSafeArea())
         .fileImporter(isPresented: $showFileImporter, allowedContentTypes: [.json], allowsMultipleSelection: false) { result in
@@ -49,7 +52,6 @@ struct MainView: View {
         VStack(spacing: 0) {
             // 1. 顶部栏
             HStack(spacing: 15) {
-                // ADAS 品牌 Logo
                 if let logo = trip.metadata.brandLogoName {
                     Image(logo)
                         .resizable()
@@ -141,7 +143,7 @@ struct MainView: View {
                     .tint(.blue)
                     .controlSize(.small)
                     .padding(.horizontal, 15)
-                    .padding(.top, 12) // 增加上边距
+                    .padding(.top, 12)
                 
                 HStack(spacing: 20) {
                     Button(action: togglePlayback) {
@@ -162,11 +164,11 @@ struct MainView: View {
                     
                     HStack(spacing: 8) {
                         Button(action: { 
-                            segmentStart = previewTime
-                            segmentEnd = min(previewTime + 30, endTime)
+                            segmentStartStr = formatDuration(previewTime - startTime)
+                            segmentEndStr = formatDuration(min(previewTime - startTime + 30, endTime - startTime))
                             showSegmentPanel.toggle() 
                         }) {
-                            HStack(spacing: 6) {
+                            HStack(spacing: 4) {
                                 Image(systemName: "scissors")
                                 Text("片段")
                             }
@@ -235,11 +237,68 @@ struct MainView: View {
         .shadow(color: Color.black.opacity(0.2), radius: 15, x: 0, y: 10)
     }
     
-    private func layoutSlider(label: String, value: Binding<CGFloat>, range: ClosedRange<CGFloat>) -> some View {
-        HStack {
-            Text(label).font(.system(size: 9)).foregroundColor(.secondary).frame(width: 10)
-            Slider(value: value, in: range).controlSize(.mini)
+    @ViewBuilder
+    private func renderSegmentInput(startTime: Double, endTime: Double, trip: TripData) -> some View {
+        VStack(spacing: 18) {
+            Text("导出片段设置")
+                .font(.system(size: 14, weight: .bold))
+                .foregroundColor(.secondary)
+            
+            VStack(spacing: 12) {
+                timeInputRow(label: "开始时间", value: $segmentStartStr)
+                timeInputRow(label: "结束时间", value: $segmentEndStr)
+            }
+            
+            Text("格式说明：MM:SS (例如 01:20)")
+                .font(.system(size: 10))
+                .foregroundColor(.secondary)
+            
+            Button(action: {
+                showSegmentPanel = false
+                Task {
+                    let s = parseDuration(segmentStartStr)
+                    let e = parseDuration(segmentEndStr)
+                    let realRange = (startTime + s)...(startTime + e)
+                    await startExport(trip, range: realRange)
+                }
+            }) {
+                Text("开始导出片段")
+                    .font(.system(size: 13, weight: .bold))
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 36)
+                    .background(Color.blue)
+                    .foregroundColor(.white)
+                    .cornerRadius(8)
+            }.buttonStyle(.plain)
         }
+        .padding(20)
+        .frame(width: 240)
+        .background(.ultraThinMaterial)
+    }
+    
+    private func timeInputRow(label: String, value: Binding<String>) -> some View {
+        HStack {
+            Text(label)
+                .font(.system(size: 12))
+                .foregroundColor(.primary)
+            Spacer()
+            TextField("00:00", text: value)
+                .textFieldStyle(.plain)
+                .font(.system(size: 13, design: .monospaced))
+                .multilineTextAlignment(.trailing)
+                .frame(width: 60)
+                .padding(6)
+                .background(Color.primary.opacity(0.05))
+                .cornerRadius(6)
+        }
+    }
+    
+    private func parseDuration(_ str: String) -> Double {
+        let parts = str.split(separator: ":").map { String($0) }
+        if parts.count == 2, let m = Double(parts[0]), let s = Double(parts[1]) {
+            return m * 60 + s
+        }
+        return Double(str) ?? 0
     }
     
     @ViewBuilder
@@ -256,20 +315,28 @@ struct MainView: View {
         if isPlaying { stopPlayback() }
         else {
             isPlaying = true
+            playbackStartWallTime = Date()
+            playbackStartPreviewTime = previewTime
             playbackTimer = Timer.scheduledTimer(withTimeInterval: 1.0/60.0, repeats: true) { _ in
                 DispatchQueue.main.async {
-                    guard let trip = self.tripData else { return }
-                    if self.previewTime < (trip.trajectory.last?.ts ?? 0) { self.previewTime += (1.0/60.0) * self.playbackSpeed }
-                    else { self.stopPlayback() }
+                    guard let trip = self.tripData, let startTime = self.playbackStartWallTime else { return }
+                    let endTime = trip.trajectory.last?.ts ?? 0
+                    let elapsedWallTime = Date().timeIntervalSince(startTime)
+                    let newTime = self.playbackStartPreviewTime + elapsedWallTime * self.playbackSpeed
+                    if newTime < endTime { self.previewTime = newTime }
+                    else { self.previewTime = endTime; self.stopPlayback() }
                 }
             }
         }
     }
     
-    func stopPlayback() { isPlaying = false; playbackTimer?.invalidate(); playbackTimer = nil }
+    func stopPlayback() { isPlaying = false; playbackTimer?.invalidate(); playbackTimer = nil; playbackStartWallTime = nil }
+    
     func formatDuration(_ seconds: Double) -> String {
-        let mins = Int(seconds) / 60; let secs = Int(seconds) % 60; return String(format: "%02d:%02d", mins, secs)
+        let s = max(0, seconds)
+        let mins = Int(s) / 60; let secs = Int(s) % 60; return String(format: "%02d:%02d", mins, secs)
     }
+    
     private func readJson(from url: URL) {
         do {
             let data = try Data(contentsOf: url)
@@ -281,42 +348,7 @@ struct MainView: View {
             }
         } catch { print("解析错误: \(error)") }
     }
-    @ViewBuilder
-    private func renderSegmentInput(startTime: Double, endTime: Double, trip: TripData) -> some View {
-        VStack(spacing: 15) {
-            Text("导出片段设置").font(.headline)
-            
-            VStack(alignment: .leading, spacing: 8) {
-                Text("开始时间 (秒)").font(.caption).foregroundColor(.secondary)
-                TextField("0.0", value: $segmentStart, format: .number)
-                    .textFieldStyle(.roundedBorder)
-                
-                Text("结束时间 (秒)").font(.caption).foregroundColor(.secondary)
-                TextField("30.0", value: $segmentEnd, format: .number)
-                    .textFieldStyle(.roundedBorder)
-            }
-            
-            Text("提示：时间相对于行程开始点").font(.system(size: 10)).foregroundColor(.secondary)
-            
-            Button(action: {
-                showSegmentPanel = false
-                Task {
-                    let realRange = (startTime + segmentStart)...(startTime + segmentEnd)
-                    await startExport(trip, range: realRange)
-                }
-            }) {
-                Text("开始导出片段")
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 8)
-                    .background(Color.blue)
-                    .foregroundColor(.white)
-                    .cornerRadius(6)
-            }.buttonStyle(.plain)
-        }
-        .padding(20)
-        .frame(width: 220)
-    }
-
+    
     private func startExport(_ trip: TripData, range: ClosedRange<Double>? = nil) async {
         stopPlayback()
         let savePanel = NSSavePanel(); savePanel.allowedContentTypes = [.quickTimeMovie]; savePanel.nameFieldStringValue = range == nil ? "Puked_Full.mov" : "Puked_Segment.mov"
@@ -327,16 +359,12 @@ struct MainView: View {
     }
 }
 
-// --- 极致紧凑 600x400 ExportFrameView (全新卡片设计) ---
-
 struct ExportFrameView: View {
     let state: InterpolatedState?; let tripData: TripData?; let interpolator: DataInterpolator?; let currentTime: Double; let layout: LayoutConfig; let showEvents: Bool
     
     var body: some View {
         VStack(spacing: 12) {
-            // 1. Telemetry Card: 所有信息放在圆角矩形内部
             HStack(alignment: .center, spacing: 20) {
-                // 左侧主要信息: 车速与时间 (横向结构)
                 HStack(spacing: 25) {
                     HStack(spacing: 8) {
                         Image(systemName: "speedometer").font(.system(size: 22)).foregroundColor(.blue)
@@ -346,20 +374,15 @@ struct ExportFrameView: View {
                             Text("KM/H").font(.system(size: 9, weight: .bold)).foregroundColor(.gray)
                         }
                     }
-                    
                     HStack(spacing: 8) {
                         Image(systemName: "clock").font(.system(size: 16)).foregroundColor(.gray)
                         HStack(alignment: .lastTextBaseline, spacing: 0) {
                             Text(formatMainTime(currentTime)).font(.system(size: 16, weight: .regular, design: .monospaced))
-                            Text(formatSubTime(currentTime)).font(.system(size: 16, weight: .thin, design: .monospaced))
-                                .foregroundColor(.gray)
+                            Text(formatSubTime(currentTime)).font(.system(size: 16, weight: .thin, design: .monospaced)).foregroundColor(.gray)
                         }
                     }
                 }
-                
                 Spacer()
-                
-                // 右侧辅助信息: X/Y 加速度 (Label-over-Value)
                 HStack(spacing: 25) {
                     accelItem(label: "X轴加速度", value: state?.gForceLongitudinal ?? 0, color: Color(red: 0.2, green: 0.9, blue: 0.4))
                     accelItem(label: "Y轴加速度", value: state?.gForceLateral ?? 0, color: Color(red: 1.0, green: 0.3, blue: 0.3))
@@ -371,11 +394,9 @@ struct ExportFrameView: View {
             .frame(width: layout.cW)
             .foregroundColor(.white)
             
-            // 2. 波形图表 (对齐卡片宽度)
             WaveformChartView(trip: tripData, interpolator: interpolator, currentTime: currentTime, showEvents: showEvents)
                 .frame(width: layout.cW)
             
-            // 3. 底部极简图例
             HStack(spacing: 20) {
                 HStack(spacing: 4) { Circle().fill(Color(red: 0.2, green: 0.9, blue: 0.4)).frame(width: 4); Text("X-ACCEL").font(.system(size: 8, weight: .bold)) }
                 HStack(spacing: 4) { Circle().fill(Color(red: 1.0, green: 0.3, blue: 0.3)).frame(width: 4); Text("Y-ACCEL").font(.system(size: 8, weight: .bold)) }
@@ -388,9 +409,7 @@ struct ExportFrameView: View {
     private func accelItem(label: String, value: Double, color: Color) -> some View {
         VStack(alignment: .trailing, spacing: 2) {
             Text(label).font(.system(size: 9, weight: .medium)).foregroundColor(color.opacity(0.8))
-            Text(String(format: "%.2f G", value))
-                .font(.system(size: 16, weight: .regular, design: .monospaced))
-                .foregroundColor(color)
+            Text(String(format: "%.2f G", value)).font(.system(size: 16, weight: .regular, design: .monospaced)).foregroundColor(color)
         }
     }
     
