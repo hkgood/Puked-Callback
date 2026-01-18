@@ -1,0 +1,52 @@
+name: Build and Release macOS App
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_16.0.app
+
+      - name: Build macOS App
+        run: |
+          xcodebuild -project Puked_CallBack.xcodeproj \
+                     -scheme Puked_CallBack \
+                     -configuration Release \
+                     -derivedDataPath Build/ \
+                     -destination 'platform=macOS' \
+                     CODE_SIGN_IDENTITY="" \
+                     CODE_SIGNING_REQUIRED=NO \
+                     CODE_SIGNING_ALLOWED=NO
+
+      - name: Package App
+        run: |
+          mkdir -p dist
+          cp -R Build/Build/Products/Release/Puked_CallBack.app dist/
+          
+      - name: Create DMG
+        run: |
+          hdiutil create -volname "Puked Callback" -srcfolder dist -ov -format UDZO Puked_Callback.dmg
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Puked_Callback_DMG
+          path: Puked_Callback.dmg
+
+      - name: Create Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Puked_Callback.dmg
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
