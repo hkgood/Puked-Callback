@@ -6,7 +6,7 @@ final class DataInterpolator: Sendable {
     private let points: [TrajectoryPoint]
     private let startTime: Double
     private let endTime: Double
-    private var calculatedG: [Double: (gx: Double, gy: Double)] = [:]
+    private let calculatedG: [Double: (gx: Double, gy: Double)]
     
     enum FrequencyMode {
         case sparse    // 1Hz 左右，需要强补帧
@@ -15,21 +15,24 @@ final class DataInterpolator: Sendable {
     let mode: FrequencyMode
     
     init(points: [TrajectoryPoint]) {
-        self.points = points.sorted { $0.ts < $1.ts }
-        self.startTime = self.points.first?.ts ?? 0
-        self.endTime = self.points.last?.ts ?? 0
+        let sortedPoints = points.sorted { $0.ts < $1.ts }
+        self.points = sortedPoints
+        self.startTime = sortedPoints.first?.ts ?? 0
+        self.endTime = sortedPoints.last?.ts ?? 0
         
-        if points.count > 1 {
-            let avgInterval = (endTime - startTime) / Double(points.count - 1)
+        if sortedPoints.count > 1 {
+            let avgInterval = (endTime - startTime) / Double(sortedPoints.count - 1)
             self.mode = avgInterval < 0.25 ? .highFreq : .sparse
-            precalculateGValues()
+            self.calculatedG = DataInterpolator.precalculateGValues(points: sortedPoints)
         } else {
             self.mode = .sparse
+            self.calculatedG = [:]
         }
     }
     
-    private func precalculateGValues() {
-        guard points.count >= 2 else { return }
+    private static func precalculateGValues(points: [TrajectoryPoint]) -> [Double: (gx: Double, gy: Double)] {
+        var results: [Double: (gx: Double, gy: Double)] = [:]
+        guard points.count >= 2 else { return [:] }
         
         for i in 0..<points.count {
             let p = points[i]
@@ -49,8 +52,8 @@ final class DataInterpolator: Sendable {
                         gx = ((next.speed - prev.speed) / dt) / 9.81
                     }
                     if p.ay == nil {
-                        let hPrev = (i == 0) ? calculateHeading(from: points[0], to: points[1]) : calculateHeading(from: points[i-1], to: points[i])
-                        let hNext = (i == points.count - 1) ? calculateHeading(from: points[i-1], to: points[i]) : calculateHeading(from: points[i], to: points[i+1])
+                        let hPrev = (i == 0) ? calculateHeadingStatic(from: points[0], to: points[1]) : calculateHeadingStatic(from: points[i-1], to: points[i])
+                        let hNext = (i == points.count - 1) ? calculateHeadingStatic(from: points[i-1], to: points[i]) : calculateHeadingStatic(from: points[i], to: points[i+1])
                         
                         var dH = hNext - hPrev
                         if dH > 180 { dH -= 360 }
@@ -68,8 +71,18 @@ final class DataInterpolator: Sendable {
                     }
                 }
             }
-            calculatedG[p.ts] = (gx, gy)
+            results[p.ts] = (gx, gy)
         }
+        return results
+    }
+    
+    private static func calculateHeadingStatic(from: TrajectoryPoint, to: TrajectoryPoint) -> Double {
+        let lat1 = from.lat * Double.pi / 180; let lon1 = from.lng * Double.pi / 180
+        let lat2 = to.lat * Double.pi / 180; let lon2 = to.lng * Double.pi / 180
+        let dLon = lon2 - lon1
+        let y = sin(dLon) * cos(lat2)
+        let x = cos(lat1) * sin(lat2) - sin(lat1) * cos(lat2) * cos(dLon)
+        return atan2(y, x) * 180 / Double.pi
     }
     
     func state(at timestamp: Double) -> InterpolatedState? {
