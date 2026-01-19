@@ -8,7 +8,6 @@ on:
 jobs:
   upload:
     runs-on: ubuntu-latest
-    # 核心：显式将 Secrets 映射给环境变量，防止读取为空
     env:
       ALIST_USER: ${{ secrets.ALIST_USER }}
       ALIST_PASS: ${{ secrets.ALIST_PASSWORD }}
@@ -17,40 +16,49 @@ jobs:
         id: get_assets
         run: |
           RELEASE_ID=${{ github.event.release.id || 'latest' }}
-          # 使用 jq 获取链接，并处理成 GitHub Action 要求的 EOF 格式以支持多行
           echo "assets<<EOF" >> $GITHUB_OUTPUT
           curl -s https://api.github.com/repos/${{ github.repository }}/releases/$RELEASE_ID | jq -r '.assets[].browser_download_url' >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
-      - name: Upload to Alist via WebDAV
+      - name: Download and Upload to Alist
         run: |
           DRIVES=("Aliyun" "Baidu")
           REPO_NAME=$(echo "${{ github.repository }}" | cut -d'/' -f2)
+          ALIST_URL="http://115.29.162.18:5244/dav"
 
-          # 检查变量是否存在
+          # 检查 Secrets
           if [ -z "$ALIST_USER" ] || [ -z "$ALIST_PASS" ]; then
-            echo "❌ 错误: GitHub Secrets (ALIST_USER 或 ALIST_PASSWORD) 未读取到，请检查仓库 Settings 中的 Secrets 配置。"
+            echo "❌ Error: ALIST_USER or ALIST_PASSWORD secret is missing!"
             exit 1
           fi
 
-          # 遍历下载链接
           for url in ${{ steps.get_assets.outputs.assets }}; do
             filename=$(basename $url)
+            echo "------------------------------------------------"
+            echo "⬇️ 正在下载 GitHub 文件: $filename"
+            
+            # 1. 先下载到本地 (解决百度云 WebDAV 405 流式上传兼容性问题)
+            curl -L "$url" -o "$filename"
+
             for drive in "${DRIVES[@]}"; do
-              echo "------------------------------------------------"
-              echo "正在上传 $filename 到 $drive/$REPO_NAME ..."
+              echo "🚀 正在同步到 $drive: $drive/$REPO_NAME/$filename"
               
-              # 使用环境变量引用认证信息
-              # -L 跟随 GitHub 的重定向链接
-              curl -L "$url" | curl -v --fail \
+              # 2. 上传本地文件
+              # 使用 --fail 确保 405 时立刻报错
+              # 百度云 405 通常是由于父目录未挂载成功或驱动不支持 PUT
+              curl -v --fail \
                 --user "$ALIST_USER:$ALIST_PASS" \
-                -T - "http://115.29.162.18:5244/dav/$drive/$REPO_NAME/$filename"
+                -T "$filename" \
+                "$ALIST_URL/$drive/$REPO_NAME/$filename"
               
               if [ $? -eq 0 ]; then
-                echo "✅ $drive 同步成功"
+                echo "✅ $drive 同步完成"
               else
                 echo "❌ $drive 同步失败"
                 exit 1
               fi
             done
+            
+            # 清理本地缓存
+            rm "$filename"
           done
