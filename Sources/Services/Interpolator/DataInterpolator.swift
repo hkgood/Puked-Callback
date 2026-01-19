@@ -6,6 +6,7 @@ final class DataInterpolator: Sendable {
     private let points: [TrajectoryPoint]
     private let startTime: Double
     private let endTime: Double
+    private var calculatedG: [Double: (gx: Double, gy: Double)] = [:]
     
     enum FrequencyMode {
         case sparse    // 1Hz 左右，需要强补帧
@@ -21,8 +22,53 @@ final class DataInterpolator: Sendable {
         if points.count > 1 {
             let avgInterval = (endTime - startTime) / Double(points.count - 1)
             self.mode = avgInterval < 0.25 ? .highFreq : .sparse
+            precalculateGValues()
         } else {
             self.mode = .sparse
+        }
+    }
+    
+    private func precalculateGValues() {
+        guard points.count >= 2 else { return }
+        
+        for i in 0..<points.count {
+            let p = points[i]
+            var gx = p.ax ?? 0
+            var gy = p.ay ?? 0
+            
+            // 如果缺失 G 值且是稀疏模式，使用中心差分法估算
+            if p.ax == nil || p.ay == nil {
+                let prevIdx = max(0, i - 1)
+                let nextIdx = min(points.count - 1, i + 1)
+                let prev = points[prevIdx]
+                let next = points[nextIdx]
+                let dt = next.ts - prev.ts
+                
+                if dt > 0 {
+                    if p.ax == nil {
+                        gx = ((next.speed - prev.speed) / dt) / 9.81
+                    }
+                    if p.ay == nil {
+                        let hPrev = (i == 0) ? calculateHeading(from: points[0], to: points[1]) : calculateHeading(from: points[i-1], to: points[i])
+                        let hNext = (i == points.count - 1) ? calculateHeading(from: points[i-1], to: points[i]) : calculateHeading(from: points[i], to: points[i+1])
+                        
+                        var dH = hNext - hPrev
+                        if dH > 180 { dH -= 360 }
+                        if dH < -180 { dH += 360 }
+                        
+                        let dtInner = (i == 0 || i == points.count - 1) ? (next.ts - prev.ts) : (points[i+1].ts - points[i-1].ts)
+                        let omega = dtInner > 0 ? (dH * .pi / 180.0) / dtInner : 0
+                        gy = (p.speed * omega) / 9.81
+                    }
+                } else if points.count >= 2 {
+                    // 如果 dt 为 0（极其罕见），尝试使用相邻段的加速度
+                    if i == 0 {
+                        let dts = points[1].ts - points[0].ts
+                        if dts > 0 { gx = ((points[1].speed - points[0].speed) / dts) / 9.81 }
+                    }
+                }
+            }
+            calculatedG[p.ts] = (gx, gy)
         }
     }
     
@@ -43,36 +89,12 @@ final class DataInterpolator: Sendable {
         let smoothT = t * t * (3 - 2 * t)
         let speed = p1.speed + (p2.speed - p1.speed) * smoothT
         
-        // 2. 纵向 G 值插值 (增强型逻辑)
-        var gX: Double = 0
-        if let ax1 = p1.ax, let ax2 = p2.ax {
-            gX = ax1 + (ax2 - ax1) * t
-        } else if mode == .highFreq {
-            // 高频模式下缺失点处理：寻找最近的有效值
-            gX = (p1.ax ?? p2.ax ?? 0)
-        } else {
-            let dv = p2.speed - p1.speed
-            let dt = p2.ts - p1.ts
-            gX = dt > 0 ? (dv / dt) / 9.81 : 0
-        }
+        // 2. G 值插值 (使用预计算点 + 线性插值)
+        let g1 = calculatedG[p1.ts] ?? (gx: 0, gy: 0)
+        let g2 = calculatedG[p2.ts] ?? (gx: 0, gy: 0)
         
-        // 3. 横向 G 值插值
-        var gY: Double = 0
-        if let ay1 = p1.ay, let ay2 = p2.ay {
-            gY = ay1 + (ay2 - ay1) * t
-        } else if mode == .highFreq {
-            gY = (p1.ay ?? p2.ay ?? 0)
-        } else {
-            let heading1 = calculateHeading(from: p1, to: p2)
-            let p0 = index > 1 ? points[index - 2] : p1
-            let heading0 = calculateHeading(from: p0, to: p1)
-            var dHeading = heading1 - heading0
-            if dHeading > 180 { dHeading -= 360 }
-            if dHeading < -180 { dHeading += 360 }
-            let dt = p2.ts - p1.ts
-            let omega = dt > 0 ? (dHeading * Double.pi / 180.0) / dt : 0
-            gY = (speed * omega) / 9.81
-        }
+        let gX = g1.gx + (g2.gx - g1.gx) * t
+        let gY = g1.gy + (g2.gy - g1.gy) * t
         
         return InterpolatedState(
             timestamp: timestamp,
